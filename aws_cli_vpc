@@ -1,0 +1,151 @@
+############### creating VPC-A and VPC-B in aws CLI #####################
+aws ec2 create-vpc \
+    --cidr-block 10.100.0.0/16 \
+    --tag-specification "ResourceType=vpc,Tags=[{Key=Name,Value=MyVpcA}]"
+
+aws ec2 create-vpc \
+    --cidr-block 10.200.0.0/16 \
+    --tag-specification "ResourceType=vpc,Tags=[{Key=Name,Value=MyVpcB}]"
+# aws ec2 describe-vpcs - Check the list of VPCs
+
+
+
+##### creating a variable for vpc-A id ######
+vpc_a_id=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=MyVpcA --query "Vpcs[].VpcId" --output text)
+echo $vpc_a_id
+
+##### creating a variable for vpc-B id ########
+vpc_b_id=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=MyVpcB --query "Vpcs[].VpcId" --output text)
+echo $vpc_b_id
+################################################################################
+################################################################################
+
+###################### creating a private subnet for VPC-A #####################
+aws ec2 create-subnet \
+    --vpc-id $vpc_a_id \
+    --cidr-block 10.100.0.0/17 \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=vpc-a-private-subnet}]"
+
+######## assign variable to private subnet id of VPC-A #######
+pra_subnet_id=$(aws ec2 describe-subnets --filter "Name=vpc-id,Values=$vpc_a_id" "Name=tag:Name,Values=vpc-a-private-subnet" --query "Subnets[].SubnetId" --output text | tail -1)
+echo $pra_subnet_id
+
+
+
+######################## creating a public subnet for VPC-A ####################
+aws ec2 create-subnet \
+    --vpc-id $vpc_a_id \
+    --cidr-block 10.100.128.0/17 \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=vpc-a-public-subnet}]"
+
+######### variable for public subnet Id of VPC-A #######
+pba_subnet_id=$(aws ec2 describe-subnets --filter "Name=vpc-id,Values=$vpc_a_id" "Name=tag:Name,Values=vpc-a-public-subnet" --query "Subnets[].SubnetId" --output text | tail -1)
+
+
+
+######################## creating a private subnet in VPC-B ####################
+aws ec2 create-subnet \
+    --vpc-id $vpc_b_id \
+    --cidr-block 10.200.0.0/17 \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=vpc-b-private-subnet}]"
+
+####### var for private subnet id in VPC-B ########
+prb_subnet_id=$(aws ec2 describe-subnets --filter "Name=vpc-id,Values=$vpc_b_id" "Name=tag:Name,Values=vpc-b-private-subnet" --query "Subnets[].SubnetId" --output text | tail -1)
+
+
+
+########################### create IGW for VPC-A #################################
+aws ec2 create-internet-gateway \
+    --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=vpca-igw}]"
+
+####### var for IGW Id ########
+vpca_igw_id=$(aws ec2 describe-internet-gateways --filter "Name=tag:Name,Values=vpca-igw" --query "InternetGateways[].InternetGatewayId" --output text)
+
+####### attach IGW to VPC-A ########
+aws ec2 attach-internet-gateway \
+    --internet-gateway-id $vpca_igw_id \
+    --vpc-id $vpc_a_id
+
+
+#####  auto-assign IPV4  for public Subnet VPC-A ########
+aws ec2 modify-subnet-attribute --subnet-id $pba_subnet_id --map-public-ip-on-launch
+
+#aws ec2 describe-route-tables - to check route tables 
+###### create var for rtb id of VPC-A ########
+route_table_a_id=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_a_id" --query 'RouteTables[].RouteTableId' --output text)
+
+
+####### adding a route to rtb #########
+aws ec2 create-route --route-table-id $route_table_a_id --destination-cidr-block 0.0.0.0/0 --gateway-id $vpca_igw_id
+# return will be - true
+
+################ creating ec2 in public subnet vpc-A ###########################
+###### creating security group for my instance in pub subnet vpc-A #######
+aws ec2 create-security-group --group-name sg_pub_vpc_a --description "SG for my public subnet ec2 instance in vpc-A" --vpc-id $vpc_a_id
+
+
+##### var for sg id  #######
+sg_id_pub_a=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$vpc_a_id" "Name=group-name,Values=sg_pub_vpc_a" --query "SecurityGroups[].GroupId" --output text)
+
+
+####### creating ec2 in pub subnet vpc-A ############
+aws ec2 run-instances --image-id ami-02f3f602d23f1659d --count 1 --instance-type t2.micro --key-name tentek --subnet-id $pba_subnet_id --security-group-ids $sg_id_pub_a --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vpcA-pub}]'
+
+##### var for ec2 public ip ########
+vpcA_pub_ip=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=vpcA-pub" --query "Reservations[*].Instances[*].PublicIpAddress" --output text | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+
+######### opening port 22 to my public ip ######
+#aws ec2 authorize-security-group-ingress --group-id $sg_id_pub_a --protocol tcp --port 22 --cidr $vpcA_pub_ip/32
+
+######## another way to assign port 22 for MyIp ############
+my_pub_ip=$(curl -s http://ipv4.icanhazip.com) #var to get my local mac pub ipv4
+aws ec2 authorize-security-group-ingress --group-id $sg_id_pub_a --protocol tcp --port 22 --cidr $my_pub_ip/32
+
+
+
+
+################################################################################
+
+#################### Creating ec2 in private subnet vpc-A #######################
+
+###### creating security group for my instance in private subnet vpc-A #######
+aws ec2 create-security-group --group-name sg_priv_vpc_a --description "SG for my private subnet ec2 instance in vpc-A" --vpc-id $vpc_a_id
+
+##### var for sg id  #######
+sg_id_priv_a=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$vpc_a_id" "Name=group-name,Values=sg_priv_vpc_a" --query "SecurityGroups[].GroupId" --output text)
+
+####### creating ec2 in private subnet vpc-A ############
+aws ec2 run-instances --image-id ami-02f3f602d23f1659d --count 1 --instance-type t2.micro --key-name tentek --subnet-id $pra_subnet_id --security-group-ids $sg_id_priv_a --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vpcA-priv}]'
+
+############# var for public subnet Cidr of vpc-A ###############
+cidr_pub_vpc_a=$(aws ec2 describe-subnets --filter "Name=vpc-id,Values=$vpc_a_id" "Name=tag:Name,Values=vpc-a-public-subnet" --query "Subnets[].CidrBlock" --output text )
+
+############## opening port 22 for public subnet cidr ########################
+aws ec2 authorize-security-group-ingress --group-id $sg_id_priv_a --protocol tcp --port 22 --cidr $cidr_pub_vpc_a
+
+
+##################################################################################
+################### creating ec2 in vpc-B private subnet ##########################
+
+###### creating security group for my instance in private subnet vpc-B #######
+aws ec2 create-security-group --group-name sg_priv_vpc_b --description "SG for my private subnet ec2 instance in vpc-B" --vpc-id $vpc_b_id
+
+##### var for sg id  #######
+sg_id_priv_b=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$vpc_b_id" "Name=group-name,Values=sg_priv_vpc_b" --query "SecurityGroups[].GroupId" --output text)
+
+############### creating ec2 ############
+aws ec2 run-instances --image-id ami-02f3f602d23f1659d --count 1 --instance-type t2.micro --key-name tentek --subnet-id $prb_subnet_id --security-group-ids $sg_id_priv_b --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vpcB-priv}]'
+
+##### var for private subnet cidr of vpc - A ################
+cidr_priv_vpc_a=$(aws ec2 describe-subnets --filter "Name=vpc-id,Values=$vpc_a_id" "Name=tag:Name,Values=vpc-a-private-subnet" --query "Subnets[].CidrBlock" --output text )
+
+######### openning port 22 for priv subnet vpc-A ##############
+aws ec2 authorize-security-group-ingress --group-id $sg_id_priv_b --protocol tcp --port 22 --cidr $cidr_priv_vpc_a
+
+ssh ec2-user@$vpcA_pub_ip -i ~/Desktop/tentek/tentek.pem #ssh
+
+######### assign var for priv sub private ipv4 ##########
+vpcA_priv_ip=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=vpcA-priv" --query "Reservations[*].Instances[*].PrivateIpAddress" --output text | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+
+
+#
